@@ -1,0 +1,14 @@
+{
+  "name": "reachpaglu",
+  "version": "1.0.0",
+  "description": "Crowdsourced scam detection browser extension",
+  "scripts": {
+    "start-backend": "cd backend && npm start",
+    "install-backend": "cd backend && npm install",
+    "build": "node build.js",
+    "build-prod": "NODE_ENV=production node build.js"
+  },
+  "devDependencies": {
+    "archiver": "^5.3.1"
+  }
+}

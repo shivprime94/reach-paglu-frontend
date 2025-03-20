@@ -1,0 +1,133 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>ReachPaglu</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <div class="container">
+    <header>
+      <h1>ReachPaglu</h1>
+      <p class="subtitle">Crowdsourced scam detection</p>
+    </header>
+    
+    <div id="mainContent">
+      <!-- Loading screen -->
+      <div id="loading" class="fade-in">
+        <div class="loading-spinner"></div>
+      </div>
+    
+      <!-- Report form (shown when reporting) -->
+      <div id="reportForm" class="fade-in" style="display: none;">
+        <h2 class="card-title">Report Suspicious Account</h2>
+        
+        <div class="form-group">
+          <label for="platform">Platform</label>
+          <select id="platform" required>
+            <option value="twitter">Twitter/X</option>
+            <option value="linkedin">LinkedIn</option>
+          </select>
+        </div>
+        
+        <div class="form-group">
+          <label for="accountId">Account ID</label>
+          <input type="text" id="accountId" placeholder="Username or profile ID" required>
+        </div>
+        
+        <div class="form-group">
+          <label for="evidence">Evidence</label>
+          <textarea id="evidence" placeholder="Describe why you think this is a scam (required)" required></textarea>
+        </div>
+        
+        <div class="form-group">
+          <label for="evidenceUrl">Evidence URL (optional)</label>
+          <input type="url" id="evidenceUrl" placeholder="Link to screenshot or post">
+        </div>
+        
+        <div class="form-group">
+          <button id="submitReportBtn" class="btn primary">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+              <path d="M5 13L9 17L19 7" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+            </svg>
+            Submit Report
+          </button>
+          <button id="cancelReportBtn" class="btn secondary">Cancel</button>
+        </div>
+      </div>
+      
+      <!-- Account info (shown when viewing profile) -->
+      <div id="accountInfo" class="fade-in" style="display: none;">
+        <div id="accountHeader">
+          <h2 id="accountIdDisplay"></h2>
+          <span id="accountStatus" class="status"></span>
+        </div>
+        
+        <div id="accountDetails">
+          <p id="votesInfo"></p>
+          <div id="scammerWarning" class="warning" style="display: none;">
+            <p>⚠️ This account has been flagged as a potential scammer by the community.</p>
+          </div>
+        </div>
+        
+        <div class="actions">
+          <button id="reportBtn" class="btn primary">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+              <path d="M12 9V15M12 15L15 12M12 15L9 12M21 12C21 16.9706 16.9706 21 12 21C7.02944 21 3 16.9706 3 12C3 7.02944 7.02944 3 12 3C16.9706 3 21 7.02944 21 12Z" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+            </svg>
+            Report Account
+          </button>
+          <button id="checkAgainBtn" class="btn secondary">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+              <path d="M4 4V9H4.58152M19.9381 11C19.446 7.05369 16.0796 4 12 4C8.64262 4 5.76829 6.06817 4.58152 9M4.58152 9H9M20 20V15H19.4185M19.4185 15C18.2317 17.9318 15.3574 20 12 20C7.92038 20 4.55399 16.9463 4.06189 13M19.4185 15H15" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+            </svg>
+            Check Again
+          </button>
+        </div>
+      </div>
+      
+      <!-- Home screen (shown when not on a profile) -->
+      <div id="homeScreen" class="fade-in" style="display: none;">
+        <div class="card">
+          <p>Visit a Twitter/X or LinkedIn profile to check if it's been reported as a scammer.</p>
+        </div>
+        
+        <div class="manual-check">
+          <h3>Check account manually</h3>
+          <div class="form-manual">
+            <div class="form-group">
+              <label for="manualPlatform">Platform</label>
+              <select id="manualPlatform">
+                <option value="twitter">Twitter/X</option>
+                <option value="linkedin">LinkedIn</option>
+              </select>
+            </div>
+            <div class="form-group">
+              <label for="manualAccountId">Username or Profile ID</label>
+              <input type="text" id="manualAccountId" placeholder="Enter username to check">
+            </div>
+            <button id="manualCheckBtn" class="btn primary full-width">Check Account</button>
+          </div>
+        </div>
+        
+        <button id="reportNewBtn" class="btn primary">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+            <path d="M12 5V19M5 12H19" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+          </svg>
+          Report a Scammer
+        </button>
+      </div>
+    </div>
+    
+    <footer>
+      <p>Powered by community reports. Use responsibly.</p>
+    </footer>
+  </div>
+  
+  <script src="popup.js"></script>
+</body>
+</html>
