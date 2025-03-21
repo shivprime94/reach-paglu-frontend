@@ -507,3 +507,16 @@ footer {
 .notification.success {
   border-left: 4px solid var(--success-color);
 }
+
+/* Button group styles */
+.btn-group {
+  display: flex;
+  gap: 12px;
+  margin-top: 24px;
+}
+
+.btn-group .btn {
+  flex: 1;
+  justify-content: center;
+  min-width: 120px;
+}

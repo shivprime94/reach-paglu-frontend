@@ -3,10 +3,47 @@
 // Configuration
 const API_URL = 'https://reach-paglu-backend.onrender.com'
 const CHECK_INTERVAL = 2000; // Check every 2 seconds for account changes (navigation)
+const MAX_RETRIES = 3;       // Maximum number of retries when getting extension context errors
+const RETRY_DELAY = 500;     // 500ms between retries
 
 // State
 let lastCheckedUrl = '';
 let warningBanner = null;
+
+// Helper function to sanitize input strings
+function sanitizeInput(input) {
+  if (typeof input !== 'string') return input;
+  // Basic sanitization to prevent XSS
+  return input.replace(/[<>]/g, '');
+}
+
+// Safely create HTML content
+function createSafeHTML(tagName, attributes = {}, textContent = '') {
+  const element = document.createElement(tagName);
+  
+  // Set attributes safely
+  Object.keys(attributes).forEach(key => {
+    if (key === 'style' && typeof attributes[key] === 'object') {
+      // Handle style objects
+      Object.keys(attributes[key]).forEach(styleKey => {
+        element.style[styleKey] = attributes[key][styleKey];
+      });
+    } else if (key.startsWith('on')) {
+      // Don't allow inline event handlers (security risk)
+      console.warn('Inline event handlers not allowed:', key);
+    } else {
+      // Set regular attributes
+      element.setAttribute(key, attributes[key]);
+    }
+  });
+  
+  // Set text content safely
+  if (textContent) {
+    element.textContent = textContent;
+  }
+  
+  return element;
+}
 
 // Detect which platform we're on
 function detectPlatform() {
@@ -50,21 +87,125 @@ function extractAccountId() {
   return null;
 }
 
-// Check if an account is flagged as a scammer
-async function checkAccount(accountInfo) {
+// Check if an account is flagged as a scammer with retry mechanism
+async function checkAccount(accountInfo, forceRefresh = false, retryCount = 0) {
   if (!accountInfo) return null;
   
   try {
-    const response = await fetch(`${API_URL}/check/${accountInfo.platform}/${accountInfo.id}`);
-    if (response.ok) {
-      const data = await response.json();
-      return data;
+    // Sanitize inputs
+    const platform = sanitizeInput(accountInfo.platform);
+    const id = sanitizeInput(accountInfo.id);
+    
+    if (!platform || !id) {
+      console.error('Invalid account info');
+      return null;
     }
+    
+    // Add forceRefresh flag to message if needed
+    const message = {
+      action: 'checkAccount',
+      platform,
+      accountId: id
+    };
+    
+    if (forceRefresh) {
+      // If forcing a refresh, first clear the cache for this account
+      try {
+        await chrome.runtime.sendMessage({
+          action: 'clearCache',
+          accountKey: `${platform}:${id}`
+        });
+      } catch (error) {
+        console.warn('Cache clearing failed, continuing with check:', error);
+        // Continue anyway - non-critical operation
+      }
+    }
+    
+    // Wrap message sending in a promise with timeout
+    const response = await sendMessageWithTimeout(message);
+    
+    if (response && response.success) {
+      return response.data;
+    } else if (response && response.error && response.error.includes('context invalidated')) {
+      throw new Error('Extension context invalidated');
+    }
+    
+    return null;
   } catch (error) {
     console.error('Error checking account:', error);
+    
+    // Implement retry logic for context invalidation
+    if (error.message.includes('context invalidated') && retryCount < MAX_RETRIES) {
+      console.log(`Retry attempt ${retryCount + 1} for ${accountInfo.platform}:${accountInfo.id}`);
+      
+      // Wait a bit before retrying to let the extension context stabilize
+      await new Promise(resolve => setTimeout(resolve, RETRY_DELAY));
+      
+      // Try a direct API call to the backend as a fallback
+      try {
+        const data = await fetchAccountDataDirectly(accountInfo.platform, accountInfo.id);
+        if (data) return data;
+      } catch (directError) {
+        console.warn('Direct API call failed:', directError);
+        // Continue with retry
+      }
+      
+      return checkAccount(accountInfo, forceRefresh, retryCount + 1);
+    }
   }
   
   return null;
+}
+
+// Send message with timeout to avoid hanging when context is invalid
+function sendMessageWithTimeout(message, timeout = 5000) {
+  return new Promise((resolve) => {
+    const timer = setTimeout(() => {
+      resolve({ success: false, error: 'Message timeout' });
+    }, timeout);
+    
+    try {
+      chrome.runtime.sendMessage(message, (response) => {
+        clearTimeout(timer);
+        if (chrome.runtime.lastError) {
+          console.warn('Runtime error:', chrome.runtime.lastError);
+          resolve({ 
+            success: false, 
+            error: chrome.runtime.lastError.message || 'Extension context invalidated'
+          });
+        } else {
+          resolve(response || { success: false, error: 'Empty response' });
+        }
+      });
+    } catch (error) {
+      clearTimeout(timer);
+      console.error('Send message error:', error);
+      resolve({ success: false, error: error.message });
+    }
+  });
+}
+
+// Fallback function to fetch data directly from API if extension context fails
+async function fetchAccountDataDirectly(platform, accountId) {
+  try {
+    console.log('Attempting direct API call as fallback');
+    const response = await fetch(
+      `https://reach-paglu-backend.onrender.com/check/${encodeURIComponent(platform)}/${encodeURIComponent(accountId)}`,
+      {
+        method: 'GET',
+        headers: { 'Cache-Control': 'no-cache' }
+      }
+    );
+    
+    if (!response.ok) {
+      throw new Error(`API error: ${response.status}`);
+    }
+    
+    return await response.json();
+  } catch (error) {
+    console.error('Direct API call failed:', error);
+    throw error;
+  }
 }
 
 // Create and show warning banner
@@ -75,33 +216,34 @@ function showWarningBanner(accountInfo, data) {
   }
   
   // Create warning element with modern glassmorphism design
-  warningBanner = document.createElement('div');
-  warningBanner.className = 'reachpaglu-warning';
-  warningBanner.style.cssText = `
-    position: fixed;
-    top: 20px;
-    left: 50%;
-    transform: translateX(-50%);
-    width: 90%;
-    max-width: 600px;
-    background: rgba(247, 37, 133, 0.85);
-    color: white;
-    text-align: center;
-    padding: 16px;
-    font-size: 16px;
-    font-weight: 600;
-    z-index: 10000;
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    border-radius: 12px;
-    box-shadow: 0 8px 32px 0 rgba(31, 38, 135, 0.37);
-    backdrop-filter: blur(12px);
-    -webkit-backdrop-filter: blur(12px);
-    border: 1px solid rgba(255, 255, 255, 0.18);
-    font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
-    animation: slideDown 0.5s ease forwards;
-  `;
+  warningBanner = createSafeHTML('div', {
+    class: 'reachpaglu-warning',
+    style: {
+      position: 'fixed',
+      top: '20px',
+      left: '50%',
+      transform: 'translateX(-50%)',
+      width: '90%',
+      maxWidth: '600px',
+      background: 'rgba(247, 37, 133, 0.85)',
+      color: 'white',
+      textAlign: 'center',
+      padding: '16px',
+      fontSize: '16px',
+      fontWeight: '600',
+      zIndex: '10000',
+      display: 'flex',
+      justifyContent: 'space-between',
+      alignItems: 'center',
+      borderRadius: '12px',
+      boxShadow: '0 8px 32px 0 rgba(31, 38, 135, 0.37)',
+      backdropFilter: 'blur(12px)',
+      WebkitBackdropFilter: 'blur(12px)',
+      border: '1px solid rgba(255, 255, 255, 0.18)',
+      fontFamily: 'Inter, -apple-system, BlinkMacSystemFont, Segoe UI, Roboto, Oxygen, Ubuntu, Cantarell, sans-serif',
+      animation: 'slideDown 0.5s ease forwards'
+    }
+  });
   
   // Add animation style
   const style = document.createElement('style');
@@ -115,50 +257,90 @@ function showWarningBanner(accountInfo, data) {
       50% { transform: scale(1.05); }
       100% { transform: scale(1); }
     }
+    @keyframes slideUp {
+      from { transform: translate(-50%, 0); opacity: 1; }
+      to { transform: translate(-50%, -20px); opacity: 0; }
+    }
   `;
   document.head.appendChild(style);
   
-  // Create warning text
-  const warningText = document.createElement('div');
-  warningText.innerHTML = `
-    <div style="display: flex; align-items: center; gap: 10px;">
-      <div style="font-size: 24px; animation: pulse 2s infinite ease-in-out;">⚠️</div>
-      <div>
-        <strong>WARNING:</strong> This account has been flagged as a potential scammer
-        <div style="font-size: 14px; opacity: 0.9; margin-top: 4px;">${data.votes} community reports</div>
-      </div>
-    </div>
-  `;
+  // Create warning text container
+  const warningTextContainer = createSafeHTML('div');
+  
+  // Create warning content
+  const warningContent = createSafeHTML('div', {
+    style: {
+      display: 'flex',
+      alignItems: 'center',
+      gap: '10px'
+    }
+  });
+  
+  // Create warning icon
+  const warningIcon = createSafeHTML('div', {
+    style: {
+      fontSize: '24px',
+      animation: 'pulse 2s infinite ease-in-out'
+    }
+  }, '⚠️');
+  
+  // Create warning message
+  const warningMessage = createSafeHTML('div');
+  
+  // Add strong warning text
+  const strongWarning = createSafeHTML('strong', {}, 'WARNING:');
+  warningMessage.appendChild(strongWarning);
+  warningMessage.appendChild(document.createTextNode(' This account has been flagged as a potential scammer'));
+  
+  // Add vote count
+  const voteCount = createSafeHTML('div', {
+    style: {
+      fontSize: '14px',
+      opacity: '0.9',
+      marginTop: '4px'
+    }
+  }, `${data.votes} community reports`);
+  
+  warningMessage.appendChild(voteCount);
+  
+  // Assemble warning content
+  warningContent.appendChild(warningIcon);
+  warningContent.appendChild(warningMessage);
+  warningTextContainer.appendChild(warningContent);
   
   // Create button container
-  const buttonContainer = document.createElement('div');
-  buttonContainer.style.cssText = `
-    display: flex;
-    gap: 10px;
-  `;
+  const buttonContainer = createSafeHTML('div', {
+    style: {
+      display: 'flex',
+      gap: '10px'
+    }
+  });
   
   // Create report button
-  const reportButton = document.createElement('button');
-  reportButton.innerText = 'Submit Evidence';
-  reportButton.style.cssText = `
-    background-color: white;
-    color: #f72585;
-    border: none;
-    border-radius: 8px;
-    padding: 8px 14px;
-    cursor: pointer;
-    font-weight: 600;
-    font-size: 14px;
-    transition: all 0.3s ease;
-  `;
+  const reportButton = createSafeHTML('button', {
+    style: {
+      backgroundColor: 'white',
+      color: '#f72585',
+      border: 'none',
+      borderRadius: '8px',
+      padding: '8px 14px',
+      cursor: 'pointer',
+      fontWeight: '600',
+      fontSize: '14px',
+      transition: 'all 0.3s ease'
+    }
+  }, 'Submit Evidence');
+  
   reportButton.addEventListener('mouseover', () => {
     reportButton.style.transform = 'translateY(-2px)';
     reportButton.style.boxShadow = '0 4px 8px rgba(0, 0, 0, 0.2)';
   });
+  
   reportButton.addEventListener('mouseout', () => {
     reportButton.style.transform = 'translateY(0)';
     reportButton.style.boxShadow = 'none';
   });
+  
   reportButton.addEventListener('click', () => {
     chrome.runtime.sendMessage({
       action: 'openReport',
@@ -168,25 +350,28 @@ function showWarningBanner(accountInfo, data) {
   });
   
   // Create close button
-  const closeButton = document.createElement('button');
-  closeButton.innerText = 'Dismiss';
-  closeButton.style.cssText = `
-    background-color: transparent;
-    color: white;
-    border: 1px solid rgba(255, 255, 255, 0.5);
-    border-radius: 8px;
-    padding: 8px 14px;
-    cursor: pointer;
-    font-weight: 600;
-    font-size: 14px;
-    transition: all 0.3s ease;
-  `;
+  const closeButton = createSafeHTML('button', {
+    style: {
+      backgroundColor: 'transparent',
+      color: 'white',
+      border: '1px solid rgba(255, 255, 255, 0.5)',
+      borderRadius: '8px',
+      padding: '8px 14px',
+      cursor: 'pointer',
+      fontWeight: '600',
+      fontSize: '14px',
+      transition: 'all 0.3s ease'
+    }
+  }, 'Dismiss');
+  
   closeButton.addEventListener('mouseover', () => {
     closeButton.style.backgroundColor = 'rgba(255, 255, 255, 0.1)';
   });
+  
   closeButton.addEventListener('mouseout', () => {
     closeButton.style.backgroundColor = 'transparent';
   });
+  
   closeButton.addEventListener('click', () => {
     warningBanner.style.animation = 'slideUp 0.5s ease forwards';
     setTimeout(() => {
@@ -195,20 +380,12 @@ function showWarningBanner(accountInfo, data) {
     }, 500);
   });
   
-  // Add animation for dismissal
-  style.textContent += `
-    @keyframes slideUp {
-      from { transform: translate(-50%, 0); opacity: 1; }
-      to { transform: translate(-50%, -20px); opacity: 0; }
-    }
-  `;
-  
   // Add buttons to container
   buttonContainer.appendChild(reportButton);
   buttonContainer.appendChild(closeButton);
   
   // Assemble banner
-  warningBanner.appendChild(warningText);
+  warningBanner.appendChild(warningTextContainer);
   warningBanner.appendChild(buttonContainer);
   
   // Add to document
@@ -219,7 +396,7 @@ function showWarningBanner(accountInfo, data) {
 function createWarningBadge() {
   const badge = document.createElement('span');
   badge.className = 'reachpaglu-badge';
-  badge.innerHTML = '⚠️ Reported Scammer';
+  badge.innerHTML = '⚠️ Reported as reachpaglu';
   badge.style.cssText = `
     background-color: rgba(247, 37, 133, 0.9);
     color: white;
@@ -295,33 +472,38 @@ function injectLinkedInBadges(accountInfo, data) {
 }
 
 // Main function to check accounts and display warnings
-async function checkCurrentPage() {
-  // Only check if URL changed to avoid constant API calls
-  if (window.location.href !== lastCheckedUrl) {
-    lastCheckedUrl = window.location.href;
-    
-    const accountInfo = extractAccountId();
-    if (accountInfo) {
-      const data = await checkAccount(accountInfo);
+async function checkCurrentPage(forceRefresh = false) {
+  try {
+    // Only check if URL changed to avoid constant API calls, unless forceRefresh is true
+    if (forceRefresh || window.location.href !== lastCheckedUrl) {
+      lastCheckedUrl = window.location.href;
       
-      if (data && data.status === 'scammer') {
-        // Only show warning banner for platforms other than Twitter/X
-        if (accountInfo.platform !== 'twitter') {
-          showWarningBanner(accountInfo, data);
-        }
+      const accountInfo = extractAccountId();
+      if (accountInfo) {
+        const data = await checkAccount(accountInfo, forceRefresh);
         
-        // Add badge injection based on platform
-        if (accountInfo.platform === 'twitter') {
-          injectTwitterBadges(accountInfo, data);
-        } else if (accountInfo.platform === 'linkedin') {
-          injectLinkedInBadges(accountInfo, data);
+        if (data && data.status === 'scammer') {
+          // Only show warning banner for platforms other than Twitter/X
+          if (accountInfo.platform !== 'twitter') {
+            showWarningBanner(accountInfo, data);
+          }
+          
+          // Add badge injection based on platform
+          if (accountInfo.platform === 'twitter') {
+            injectTwitterBadges(accountInfo, data);
+          } else if (accountInfo.platform === 'linkedin') {
+            injectLinkedInBadges(accountInfo, data);
+          }
+        } else if (warningBanner) {
+          // Remove warning if account is now safe
+          warningBanner.remove();
+          warningBanner = null;
         }
-      } else if (warningBanner) {
-        // Remove warning if account is now safe
-        warningBanner.remove();
-        warningBanner = null;
       }
     }
+  } catch (error) {
+    console.error('Check page error:', error);
+    // Don't throw the error further, just log it
   }
 }
 
@@ -347,21 +529,34 @@ function initializeBadgeObserver() {
   });
 }
 
-// Initialize and set up periodic checking
+// Initialize and set up periodic checking with error handling
 function initialize() {
-  // Do an initial check
-  checkCurrentPage();
+  // Do an initial check with error handling
+  checkCurrentPage().catch(err => {
+    console.warn('Initial page check failed:', err);
+  });
   
-  // Set up interval to check periodically (handles SPA navigation)
-  setInterval(checkCurrentPage, CHECK_INTERVAL);
-  initializeBadgeObserver();  // Add this line
+  // Set up interval to check periodically with error handling
+  setInterval(() => {
+    checkCurrentPage().catch(err => {
+      console.warn('Periodic page check failed:', err);
+    });
+  }, CHECK_INTERVAL);
+  
+  initializeBadgeObserver();
 
-  // Listen for manual check requests from popup
+  // Listen for manual check requests from popup with force refresh option
   chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
-    if (message.action === 'checkNow') {
-      checkCurrentPage();
-      sendResponse({success: true});
+    if (message && message.action === 'checkNow') {
+      checkCurrentPage(message.forceRefresh === true)
+        .then(() => sendResponse({success: true}))
+        .catch(error => {
+          console.error('Check now failed:', error);
+          sendResponse({success: false, error: error.message});
+        });
+      return true;
     }
+    return false;
   });
 }
 

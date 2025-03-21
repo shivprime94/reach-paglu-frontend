@@ -150,10 +150,18 @@ async function initializePopup() {
 }
 
 // Check account status with enhanced UI feedback
-async function checkAccount(platform, accountId) {
+async function checkAccount(platform, accountId, forceRefresh = false) {
   showSection('loading');
   
   try {
+    // First clear cache if forcing refresh
+    if (forceRefresh) {
+      await chrome.runtime.sendMessage({
+        action: 'clearCache',
+        accountKey: `${platform}:${accountId}`
+      });
+    }
+    
     const response = await chrome.runtime.sendMessage({
       action: 'checkAccount',
       platform,
@@ -432,6 +440,15 @@ async function submitReport() {
       reportData
     });
     
+    // After a successful report submission, refresh data for this account
+    if (response.success) {
+      // Clear the cache for this account to ensure fresh data
+      await chrome.runtime.sendMessage({
+        action: 'clearCache',
+        accountKey: `${platform}:${accountId}`
+      });
+    }
+    
     if (!response.success) {
       // Check if it's a duplicate report error from the server
       if (response.isDuplicate) {
@@ -576,7 +593,7 @@ reportNewBtn.addEventListener('click', () => {
 
 checkAgainBtn.addEventListener('click', () => {
   if (currentAccount) {
-    checkAccount(currentAccount.platform, currentAccount.id);
+    checkAccount(currentAccount.platform, currentAccount.id, true); // true = force refresh
   }
 });
 
