@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "ReachPaglu",
-  "version": "1.0",
+  "version": "2.0",
   "description": "Crowdsourced scam detection for social media platforms",
   "permissions": ["storage", "activeTab"],
   "host_permissions": [
