@@ -2,7 +2,7 @@
  * Client-side validators that mirror backend validation
  */
 
-// Validation schemas
+// Validation schemas - simplified to include only what's actively used
 const schemas = {
   // Check account schema
   checkAccount: {
@@ -26,43 +26,9 @@ const schemas = {
         errors
       };
     }
-  },
-  
-  // Submit report schema
-  submitReport: {
-    validate(data) {
-      const errors = [];
-      
-      if (!data.platform) {
-        errors.push('Platform is required');
-      } else if (data.platform !== 'twitter' && data.platform !== 'linkedin') {
-        errors.push('Platform must be either twitter or linkedin');
-      }
-      
-      if (!data.accountId) {
-        errors.push('Account ID is required');
-      } else if (data.accountId.length > 100) {
-        errors.push('Account ID must be 100 characters or less');
-      }
-      
-      if (!data.evidence) {
-        errors.push('Evidence is required');
-      } else if (data.evidence.length < 1) {
-        errors.push('Evidence is required');
-      } else if (data.evidence.length > 800) {
-        errors.push('Evidence must be 800 characters or less');
-      }
-      
-      if (data.evidenceUrl && !isValidUrl(data.evidenceUrl)) {
-        errors.push('Evidence URL must be a valid URL');
-      }
-      
-      return {
-        valid: errors.length === 0,
-        errors
-      };
-    }
   }
+  
+  // Removed submitReport schema as it doesn't appear to be used directly
 };
 
 // Validate URL format

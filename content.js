@@ -248,13 +248,19 @@ async function fetchAccountDataDirectly(platform, accountId) {
     
     const data = await response.json();
     
-    // Cache the result locally with different durations based on status
+    // Store in chrome.storage directly
     try {
       const cacheDuration = data.status === 'scammer' 
         ? CACHE_DURATIONS.ACCOUNT_STATUS.SCAMMER  // 7 days for scammer accounts
         : CACHE_DURATIONS.ACCOUNT_STATUS.SAFE;    // 5 minutes for safe accounts
-        
-      await cache.setFormatted('accountStatus', data, cacheDuration, platform, accountId);
+      
+      chrome.storage.local.set({
+        [`accountStatus:${platform}:${accountId}`]: {
+          data,
+          expires: Date.now() + cacheDuration,
+          timestamp: Date.now()
+        }
+      });
     } catch (cacheError) {
       console.warn('Could not cache results:', cacheError);
     }
@@ -385,7 +391,7 @@ function showWarningBanner(accountInfo, data) {
     }
   });
   
-  // Create report button
+  // Create report button - modify to show different message for already flagged accounts
   const reportButton = createSafeHTML('button', {
     style: {
       backgroundColor: 'white',
@@ -398,7 +404,7 @@ function showWarningBanner(accountInfo, data) {
       fontSize: '14px',
       transition: 'all 0.3s ease'
     }
-  }, 'Submit Evidence');
+  }, data.votes >= 5 ? 'View Details' : 'Submit Evidence');  // Assuming threshold is 5
   
   reportButton.addEventListener('mouseover', () => {
     reportButton.style.transform = 'translateY(-2px)';
@@ -480,7 +486,7 @@ function createWarningBadge() {
     font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
     animation: fadeIn 0.3s ease;
   `;
-
+  
   // Add animation
   const style = document.createElement('style');
   style.textContent = `
@@ -490,7 +496,7 @@ function createWarningBadge() {
     }
   `;
   document.head.appendChild(style);
-
+  
   return badge;
 }
 
@@ -503,7 +509,7 @@ function injectTwitterBadges(accountInfo, data) {
   if (nameHeader && !nameHeader.querySelector('.reachpaglu-badge')) {
     nameHeader.appendChild(createWarningBadge());
   }
-
+  
   // Usernames in tweets and replies
   document.querySelectorAll('[data-testid="User-Name"]').forEach(element => {
     const usernameLink = element.querySelector('a');
@@ -516,7 +522,7 @@ function injectTwitterBadges(accountInfo, data) {
   });
 }
 
-// Inject badges for LinkedIn
+// Inject badges for LinkedIn profiles
 function injectLinkedInBadges(accountInfo, data) {
   if (data.status !== 'scammer') return;
 
@@ -525,7 +531,7 @@ function injectLinkedInBadges(accountInfo, data) {
   if (profileName && !profileName.querySelector('.reachpaglu-badge')) {
     profileName.appendChild(createWarningBadge());
   }
-
+  
   // Names in feed posts
   document.querySelectorAll('.feed-shared-actor__name, .update-components-actor__name').forEach(element => {
     if (!element.querySelector('.reachpaglu-badge')) {
@@ -558,6 +564,7 @@ const checkCurrentPage = debounce(async (forceRefresh = false) => {
     if (!forceRefresh && now - lastCheckTime < 5000) {
       return;
     }
+    
     lastCheckTime = now;
     
     // Only check if URL changed to avoid constant API calls, unless forceRefresh is true
@@ -600,7 +607,7 @@ function initializeBadgeObserver() {
     mutationObserver.disconnect();
   }
   
-  mutationObserver = new MutationObserver(async (mutations) => {
+  mutationObserver = new MutationObserver(async () => {
     const accountInfo = extractAccountId();
     if (accountInfo) {
       const data = await checkAccount(accountInfo);
@@ -613,34 +620,26 @@ function initializeBadgeObserver() {
       }
     }
   });
-
+  
   mutationObserver.observe(document.body, {
     childList: true,
     subtree: true,
-    attributes: false,
-    characterData: false
+    // attributes: false,
+    // characterData: false
   });
 }
 
 // Initialize and set up periodic checking with error handling
 function initialize() {
-  // Do an initial check with error handling
-  checkCurrentPage(false).catch(err => {
-    console.warn('Initial page check failed:', err);
-  });
-  
   // Listen for URL changes - modern SPA approach
   let lastUrl = location.href;
-  new MutationObserver(() => {
-    if (location.href !== lastUrl) {
-      lastUrl = location.href;
-      checkCurrentPage(false).catch(err => {
-        console.warn('URL change page check failed:', err);
-      });
-    }
-  }).observe(document, {subtree: true, childList: true});
-  
-  initializeBadgeObserver();
+  if(location.href !== lastUrl) {
+    lastUrl = location.href;
+    initializeBadgeObserver();
+    checkCurrentPage(false).catch(err => {
+      console.warn('URL change page check failed:', err);
+    });
+  }
 
   // Listen for manual check requests from popup with force refresh option
   chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {

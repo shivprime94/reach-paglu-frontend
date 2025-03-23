@@ -4,8 +4,8 @@
  */
 
 // Configuration
-// const API_URL = 'https://reach-paglu-backend.onrender.com';
-const API_URL = 'http://localhost:3000'; // Development URL
+const API_URL = 'https://reach-paglu-backend.onrender.com';
+// const API_URL = 'http://localhost:3000'; // Local testing
 
 // Extension version from manifest
 const EXTENSION_VERSION = chrome.runtime.getManifest().version;

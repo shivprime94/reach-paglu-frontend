@@ -149,6 +149,23 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           return {success: false, error: 'Missing required fields'};
         }
         
+        // NEW: Check if the account is already marked as a scammer before submitting
+        const platform = sanitizeInput(message.reportData.platform);
+        const accountId = sanitizeInput(message.reportData.accountId);
+        
+        // First check cache to see if account is already a scammer
+        const cachedStatus = await safeCache('getFormatted', 'accountStatus', platform, accountId);
+        if (cachedStatus && cachedStatus.status === 'scammer') {
+          // Return success but indicate that account is already a scammer
+          return {
+            success: true,
+            message: 'Account is already flagged as a scammer by the community',
+            alreadyScammer: true,
+            status: 'scammer',
+            votes: cachedStatus.votes
+          };
+        }
+        
         // Submit report
         const response = await api.submitReport(reportData);
         

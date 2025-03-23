@@ -17,32 +17,12 @@ export const config = {
   }
 };
 
-// Security and utility helpers
+// Simplified helpers - removed unused functions
 export const helpers = {
   // Sanitize input to prevent XSS
   sanitizeInput(input) {
     if (typeof input !== 'string') return '';
     return input.replace(/[<>]/g, '').trim();
-  },
-  
-  // Generate random nonce for CSRF protection
-  generateNonce() {
-    return Math.random().toString(36).substring(2, 15) + 
-           Math.random().toString(36).substring(2, 15);
-  },
-  
-  // Generate timestamp for request freshness
-  getTimestamp() {
-    return Date.now();
-  },
-  
-  // Debounce function to prevent rapid calls
-  debounce(func, wait) {
-    let timeout;
-    return function(...args) {
-      clearTimeout(timeout);
-      timeout = setTimeout(() => func.apply(this, args), wait);
-    };
   }
 };
 

@@ -170,6 +170,16 @@ async function checkAccount(platform, accountId, forceRefresh = false, elements)
         This account has <strong>${response.data.votes} community reports</strong>
       `;
       elements.scammerWarning.style.display = 'block';
+      
+      // Disable report button and change text for scammer accounts
+      if (elements.reportBtn) {
+        elements.reportBtn.textContent = 'Already Flagged';
+        elements.reportBtn.disabled = true;
+        elements.reportBtn.classList.add('disabled');
+        
+        // Add tooltip
+        elements.reportBtn.title = 'This account is already flagged as a scammer by the community';
+      }
     } else {
       elements.accountStatus.textContent = 'SAFE';
       elements.accountStatus.className = 'status success';
@@ -189,6 +199,14 @@ async function checkAccount(platform, accountId, forceRefresh = false, elements)
         `;
       }
       elements.scammerWarning.style.display = 'none';
+      
+      // Ensure report button is enabled for safe accounts
+      if (elements.reportBtn) {
+        elements.reportBtn.textContent = 'Report Account';
+        elements.reportBtn.disabled = false;
+        elements.reportBtn.classList.remove('disabled');
+        elements.reportBtn.title = '';
+      }
     }
     
     showSection('account', elements);
@@ -382,6 +400,35 @@ async function submitReport(elements) {
     
     const platform = elements.platformSelect.value;
     const accountId = elements.accountIdInput.value;
+    
+    // NEW: Check if account is already known to be a scammer
+    try {
+      const cachedAccount = await chrome.runtime.sendMessage({
+        action: 'checkAccount',
+        platform,
+        accountId,
+        checkCacheOnly: true
+      });
+      
+      if (cachedAccount && cachedAccount.success && 
+          cachedAccount.data && cachedAccount.data.status === 'scammer') {
+        showNotification(
+          `This account is already flagged as a scammer with ${cachedAccount.data.votes} reports. No need to report again.`,
+          'info'
+        );
+        
+        // Return to appropriate section
+        if (currentAccount) {
+          showSection('account', elements);
+        } else {
+          showSection('home', elements);
+        }
+        return;
+      }
+    } catch (cacheError) {
+      console.warn('Cache check error:', cacheError);
+      // Continue with submission even if cache check fails
+    }
     
     // Check if already reported - THIS IS THE KEY PART FOR FIXING THE LOADING ANIMATION
     const alreadyReported = await hasReportedAccount(platform, accountId);
@@ -630,6 +677,8 @@ document.addEventListener('DOMContentLoaded', async () => {
         elements.accountIdInput.value = currentAccount.id;
         checkAccount(currentAccount.platform, currentAccount.id, false, elements);
         showSection('account', elements);
+        elements.evidenceInput.value = '';
+        elements.evidenceUrlInput.value = '';
       } else {
         showSection('home', elements);
       }
