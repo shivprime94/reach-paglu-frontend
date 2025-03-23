@@ -6,40 +6,13 @@ const isReportMode = urlParams.get('reportMode') === 'true';
 const urlPlatform = urlParams.get('platform');
 const urlAccountId = urlParams.get('accountId');
 
-// Elements
-const loadingEl = document.getElementById('loading');
-const mainContentEl = document.getElementById('mainContent');
-const reportFormEl = document.getElementById('reportForm');
-const accountInfoEl = document.getElementById('accountInfo');
-const homeScreenEl = document.getElementById('homeScreen');
-
-// Form elements
-const platformSelect = document.getElementById('platform');
-const accountIdInput = document.getElementById('accountId');
-const evidenceInput = document.getElementById('evidence');
-const evidenceUrlInput = document.getElementById('evidenceUrl');
-const submitReportBtn = document.getElementById('submitReportBtn');
-const cancelReportBtn = document.getElementById('cancelReportBtn');
-
-// Account info elements
-const accountIdDisplay = document.getElementById('accountIdDisplay');
-const accountStatus = document.getElementById('accountStatus');
-const votesInfo = document.getElementById('votesInfo');
-const scammerWarning = document.getElementById('scammerWarning');
-const reportBtn = document.getElementById('reportBtn');
-const checkAgainBtn = document.getElementById('checkAgainBtn');
-
-// Home screen elements
-const manualPlatformSelect = document.getElementById('manualPlatform');
-const manualAccountIdInput = document.getElementById('manualAccountId');
-const manualCheckBtn = document.getElementById('manualCheckBtn');
-const reportNewBtn = document.getElementById('reportNewBtn');
-
 // Current account
 let currentAccount = null;
 
 // Show the appropriate section based on context with smooth transitions
-function showSection(section) {
+function showSection(section, elements) {
+  const { loadingEl, reportFormEl, accountInfoEl, homeScreenEl } = elements;
+  
   // Fade out all sections first
   const sections = [loadingEl, reportFormEl, accountInfoEl, homeScreenEl];
   sections.forEach(el => {
@@ -84,16 +57,16 @@ function showSection(section) {
 }
 
 // Initialize the popup based on context and params
-async function initializePopup() {
-  showSection('loading');
+async function initializePopup(elements) {
+  showSection('loading', elements);
   
   // If URL parameters specify report mode, show the report form
   if (isReportMode) {
     if (urlPlatform && urlAccountId) {
-      platformSelect.value = urlPlatform;
-      accountIdInput.value = urlAccountId;
+      elements.platformSelect.value = urlPlatform;
+      elements.accountIdInput.value = urlAccountId;
     }
-    showSection('report');
+    showSection('report', elements);
     return;
   }
   
@@ -102,7 +75,7 @@ async function initializePopup() {
     const [activeTab] = await chrome.tabs.query({ active: true, currentWindow: true });
     
     if (!activeTab) {
-      showSection('home');
+      showSection('home', elements);
       return;
     }
     
@@ -136,24 +109,26 @@ async function initializePopup() {
     
     // If we found an account, check its status
     if (platform && accountId) {
-      await checkAccount(platform, accountId);
+      await checkAccount(platform, accountId, false, elements);
       return;
     }
     
     // If no account found, show home screen
-    showSection('home');
+    showSection('home', elements);
     
   } catch (error) {
     console.error('Error initializing popup:', error);
-    showSection('home');
+    showSection('home', elements);
   }
 }
 
 // Check account status with enhanced UI feedback
-async function checkAccount(platform, accountId, forceRefresh = false) {
-  showSection('loading');
+async function checkAccount(platform, accountId, forceRefresh = false, elements) {
+  showSection('loading', elements);
   
   try {
+    const fingerprintId = await ensureFingerprint();
+    
     // First clear cache if forcing refresh
     if (forceRefresh) {
       await chrome.runtime.sendMessage({
@@ -162,11 +137,14 @@ async function checkAccount(platform, accountId, forceRefresh = false) {
       });
     }
     
-    const response = await chrome.runtime.sendMessage({
+    const message = {
       action: 'checkAccount',
       platform,
-      accountId
-    });
+      accountId,
+      fingerprintId // Add fingerprint ID
+    };
+
+    const response = await chrome.runtime.sendMessage(message);
     
     if (!response.success) {
       throw new Error(response.error || 'Failed to check account');
@@ -180,45 +158,45 @@ async function checkAccount(platform, accountId, forceRefresh = false) {
     };
     
     // Update UI with enhanced visuals
-    accountIdDisplay.textContent = `@${accountId} (${platform === 'twitter' ? 'Twitter/X' : 'LinkedIn'})`;
+    elements.accountIdDisplay.textContent = `@${accountId} (${platform === 'twitter' ? 'Twitter/X' : 'LinkedIn'})`;
     
     if (response.data.status === 'scammer') {
-      accountStatus.textContent = 'FLAGGED';
-      accountStatus.className = 'status danger';
-      votesInfo.innerHTML = `
+      elements.accountStatus.textContent = 'FLAGGED';
+      elements.accountStatus.className = 'status danger';
+      elements.votesInfo.innerHTML = `
         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" style="vertical-align: middle; margin-right: 5px;">
           <path d="M12 9V13M12 17H12.01M7.8 21H16.2C17.8802 21 18.7202 21 19.362 20.673C19.9265 20.3854 20.3854 19.9265 20.673 19.362C21 18.7202 21 17.8802 21 16.2V7.8C21 6.11984 21 5.27976 20.673 4.63803C20.3854 4.07354 19.9265 3.6146 19.362 3.32698C18.7202 3 17.8802 3 16.2 3H7.8C6.11984 3 5.27976 3 4.63803 3.32698C4.07354 3.6146 3.6146 4.07354 3.32698 4.63803C3 5.27976 3 6.11984 3 7.8V16.2C3 17.8802 3 18.7202 3.32698 19.362C3.6146 19.9265 4.07354 20.3854 4.63803 20.673C5.27976 21 6.11984 21 7.8 21Z" stroke="#f72585" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
         </svg>
         This account has <strong>${response.data.votes} community reports</strong>
       `;
-      scammerWarning.style.display = 'block';
+      elements.scammerWarning.style.display = 'block';
     } else {
-      accountStatus.textContent = 'SAFE';
-      accountStatus.className = 'status success';
+      elements.accountStatus.textContent = 'SAFE';
+      elements.accountStatus.className = 'status success';
       if (response.data.votes > 0) {
-        votesInfo.innerHTML = `
+        elements.votesInfo.innerHTML = `
           <svg width="16" height="16" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" style="vertical-align: middle; margin-right: 5px;">
             <path d="M9 12L11 14L15 10M21 12C21 16.9706 16.9706 21 12 21C7.02944 21 3 16.9706 3 12C3 7.02944 7.02944 3 12 3C16.9706 3 21 7.02944 21 12Z" stroke="#4cc9f0" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
           </svg>
           This account has <strong>${response.data.votes} reports</strong>, below the threshold
         `;
       } else {
-        votesInfo.innerHTML = `
+        elements.votesInfo.innerHTML = `
           <svg width="16" height="16" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" style="vertical-align: middle; margin-right: 5px;">
             <path d="M9 12L11 14L15 10M21 12C21 16.9706 16.9706 21 12 21C7.02944 21 3 16.9706 3 12C3 7.02944 7.02944 3 12 3C16.9706 3 21 7.02944 21 12Z" stroke="#4cc9f0" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
           </svg>
           No reports found for this account
         `;
       }
-      scammerWarning.style.display = 'none';
+      elements.scammerWarning.style.display = 'none';
     }
     
-    showSection('account');
+    showSection('account', elements);
     
   } catch (error) {
     console.error('Error checking account:', error);
     // Show error in a more user-friendly way
-    homeScreenEl.innerHTML = `
+    elements.homeScreenEl.innerHTML = `
       <div class="card" style="border-left: 4px solid #f72585;">
         <h3 style="color: #f72585; margin-bottom: 10px;">Error</h3>
         <p>${error.message || 'Failed to check account'}</p>
@@ -239,7 +217,7 @@ async function checkAccount(platform, accountId, forceRefresh = false) {
     
     // Re-attach the event listener for the new button
     document.getElementById('tryAgainBtn').addEventListener('click', () => {
-      initializePopup();
+      initializePopup(elements);
     });
     
     document.getElementById('manualCheckBtn').addEventListener('click', () => {
@@ -251,10 +229,10 @@ async function checkAccount(platform, accountId, forceRefresh = false) {
         return;
       }
       
-      checkAccount(platform, accountId);
+      checkAccount(platform, accountId, false, elements);
     });
     
-    showSection('home');
+    showSection('home', elements);
   }
 }
 
@@ -377,248 +355,333 @@ async function markAccountAsReported(platform, accountId) {
 }
 
 // Submit a report with improved feedback
-async function submitReport() {
-  // Validate form
-  if (!platformSelect.value) {
-    showNotification('Please select a platform');
-    return;
-  }
-  
-  if (!accountIdInput.value) {
-    showNotification('Please enter an account ID');
-    return;
-  }
-  
-  if (!evidenceInput.value) {
-    showNotification('Please provide evidence of why this account is suspicious');
-    return;
-  }
-  
-  const platform = platformSelect.value;
-  const accountId = accountIdInput.value;
-  
-  // Check if already reported - THIS IS THE KEY PART FOR FIXING THE LOADING ANIMATION
-  const alreadyReported = await hasReportedAccount(platform, accountId);
-  if (alreadyReported) {
-    // Use custom notification instead of alert
-    showNotification(`You have already reported the account @${accountId}. Each user can only report an account once.`, 'error');
-    // Show the appropriate section rather than getting stuck in loading
-    if (currentAccount) {
-      showSection('account');
-    } else {
-      showSection('home');
-    }
-    return;
-  }
-  
-  // Get user token
-  const userToken = await ensureUserToken();
-  
-  // Prepare report data
-  const reportData = {
-    platform,
-    accountId,
-    evidence: evidenceInput.value,
-    evidenceUrl: evidenceUrlInput.value || null,
-    reporterToken: userToken
-  };
-  
-  // Update button state and show loading indicator
-  submitReportBtn.disabled = true;
-  submitReportBtn.innerHTML = `
-    <svg class="spinner" width="16" height="16" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
-      <circle cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4" stroke-dasharray="30 30" stroke-dashoffset="0">
-        <animateTransform attributeName="transform" attributeType="XML" type="rotate" from="0 12 12" to="360 12 12" dur="1s" repeatCount="indefinite"/>
-      </circle>
-    </svg>
-    Submitting...
-  `;
-  
+async function submitReport(elements) {
   try {
-    const response = await chrome.runtime.sendMessage({
-      action: 'submitReport',
-      reportData
-    });
-    
-    // After a successful report submission, refresh data for this account
-    if (response.success) {
-      // Clear the cache for this account to ensure fresh data
-      await chrome.runtime.sendMessage({
-        action: 'clearCache',
-        accountKey: `${platform}:${accountId}`
-      });
+    // Get fingerprint before submitting
+    const fingerprintId = await ensureFingerprint();
+    if (!fingerprintId) {
+      showNotification('Unable to generate unique identifier', 'error');
+      return;
     }
-    
-    if (!response.success) {
-      // Check if it's a duplicate report error from the server
-      if (response.isDuplicate) {
-        // Mark the account as reported locally to avoid future attempts
-        await markAccountAsReported(platform, accountId);
-        
-        throw new Error('You have already reported this account');
-      }
-      throw new Error(response.error || 'Failed to submit report');
-    }
-    
-    // Mark account as reported locally
-    await markAccountAsReported(platform, accountId);
-    
-    // Success message with animation
-    reportFormEl.innerHTML = `
-      <div class="success-animation">
-        <svg class="checkmark" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 52 52">
-          <circle class="checkmark__circle" cx="26" cy="26" r="25" fill="none" />
-          <path class="checkmark__check" fill="none" d="M14.1 27.2l7.1 7.2 16.7-16.8" />
-        </svg>
-      </div>
-      <h2 style="text-align: center; margin: 16px 0;">Report Submitted</h2>
-      <p style="text-align: center; margin-bottom: 24px;">Thank you for helping keep the community safe!</p>
-      <button id="viewAccountBtn" class="btn primary" style="width: 100%;">View Account Status</button>
-    `;
-    
-    // Add animation styles
-    const style = document.createElement('style');
-    style.textContent = `
-      .success-animation {
-        display: flex;
-        justify-content: center;
-        margin: 20px 0;
-      }
-      .checkmark {
-        width: 80px;
-        height: 80px;
-        border-radius: 50%;
-        display: block;
-        stroke-width: 2;
-        stroke: #4cc9f0;
-        stroke-miterlimit: 10;
-        box-shadow: 0 0 0 #4cc9f0;
-        animation: fill 0.4s ease-in-out 0.4s forwards, scale 0.3s ease-in-out 0.9s both;
-      }
-      .checkmark__circle {
-        stroke-dasharray: 166;
-        stroke-dashoffset: 166;
-        stroke-width: 2;
-        stroke: #4cc9f0;
-        fill: none;
-        animation: stroke 0.6s cubic-bezier(0.65, 0, 0.45, 1) forwards;
-      }
-      .checkmark__check {
-        transform-origin: 50% 50%;
-        stroke-dasharray: 48;
-        stroke-dashoffset: 48;
-        animation: stroke 0.3s cubic-bezier(0.65, 0, 0.45, 1) 0.8s forwards;
-      }
-      @keyframes stroke {
-        100% { stroke-dashoffset: 0; }
-      }
-      @keyframes scale {
-        0%, 100% { transform: none; }
-        50% { transform: scale3d(1.1, 1.1, 1); }
-      }
-      @keyframes fill {
-        100% { box-shadow: inset 0 0 0 80px rgba(76, 201, 240, 0.1); }
-      }
-    `;
-    document.head.appendChild(style);
-    
-    // Add event listener to view account button
-    document.getElementById('viewAccountBtn').addEventListener('click', () => {
-      checkAccount(reportData.platform, reportData.accountId);
-    });
-    
-    showSection('report');
-    
-  } catch (error) {
-    console.error('Error submitting report:', error);
-    
-    // Reset button state
-    submitReportBtn.disabled = false;
-    submitReportBtn.innerHTML = `
-      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
-        <path d="M5 13L9 17L19 7" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
-      </svg>
-      Submit Report
-    `;
-    
-    // Show error notification
-    showNotification(`Error: ${error.message}`, 'error');
-    
-    // Show the appropriate section
-    if (currentAccount) {
-      showSection('account');
-    } else {
-      showSection('report'); // Stay on report form to let user try again
-    }
-  }
-}
 
-// Update reportBtn click handler to check if account is already reported
-reportBtn.addEventListener('click', async () => {
-  if (currentAccount) {
-    // Check if already reported before showing the form
-    const alreadyReported = await hasReportedAccount(currentAccount.platform, currentAccount.id);
-    if (alreadyReported) {
-      showNotification(`You have already reported the account @${currentAccount.id}. Each user can only report an account once.`, 'error');
+    // Validate form
+    if (!elements.platformSelect.value) {
+      showNotification('Please select a platform');
       return;
     }
     
-    platformSelect.value = currentAccount.platform;
-    accountIdInput.value = currentAccount.id;
-    showSection('report');
+    if (!elements.accountIdInput.value) {
+      showNotification('Please enter an account ID');
+      return;
+    }
+    
+    if (!elements.evidenceInput.value) {
+      showNotification('Please provide evidence of why this account is suspicious');
+      return;
+    }
+    
+    const platform = elements.platformSelect.value;
+    const accountId = elements.accountIdInput.value;
+    
+    // Check if already reported - THIS IS THE KEY PART FOR FIXING THE LOADING ANIMATION
+    const alreadyReported = await hasReportedAccount(platform, accountId);
+    if (alreadyReported) {
+      // Use custom notification instead of alert
+      showNotification(`You have already reported the account @${accountId}. Each user can only report an account once.`, 'error');
+      // Show the appropriate section rather than getting stuck in loading
+      if (currentAccount) {
+        showSection('account', elements);
+      } else {
+        showSection('home', elements);
+      }
+      return;
+    }
+    
+    // Get user token
+    const userToken = await ensureUserToken();
+    
+    // Prepare report data with fingerprint
+    const reportData = {
+      platform,
+      accountId,
+      evidence: elements.evidenceInput.value,
+      evidenceUrl: elements.evidenceUrlInput.value || null,
+      reporterToken: userToken,
+      fingerprintId // Add fingerprint ID
+    };
+    
+    // Update button state and show loading indicator
+    elements.submitReportBtn.disabled = true;
+    elements.submitReportBtn.innerHTML = `
+      <svg class="spinner" width="16" height="16" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+        <circle cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4" stroke-dasharray="30 30" stroke-dashoffset="0">
+          <animateTransform attributeName="transform" attributeType="XML" type="rotate" from="0 12 12" to="360 12 12" dur="1s" repeatCount="indefinite"/>
+        </circle>
+      </svg>
+      Submitting...
+    `;
+    
+    try {
+      const response = await chrome.runtime.sendMessage({
+        action: 'submitReport',
+        reportData
+      });
+      
+      // After a successful report submission, refresh data for this account
+      if (response.success) {
+        // Clear the cache for this account to ensure fresh data
+        await chrome.runtime.sendMessage({
+          action: 'clearCache',
+          accountKey: `${platform}:${accountId}`
+        });
+      }
+      
+      if (!response.success) {
+        // Check if it's a duplicate report error from the server
+        if (response.isDuplicate) {
+          // Mark the account as reported locally to avoid future attempts
+          await markAccountAsReported(platform, accountId);
+          
+          throw new Error('You have already reported this account');
+        }
+        throw new Error(response.error || 'Failed to submit report');
+      }
+      
+      // Mark account as reported locally
+      await markAccountAsReported(platform, accountId);
+      
+      // Success message with animation
+      elements.reportFormEl.innerHTML = `
+        <div class="success-animation">
+          <svg class="checkmark" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 52 52">
+            <circle class="checkmark__circle" cx="26" cy="26" r="25" fill="none" />
+            <path class="checkmark__check" fill="none" d="M14.1 27.2l7.1 7.2 16.7-16.8" />
+          </svg>
+        </div>
+        <h2 style="text-align: center; margin: 16px 0;">Report Submitted</h2>
+        <p style="text-align: center; margin-bottom: 24px;">Thank you for helping keep the community safe!</p>
+        <button id="viewAccountBtn" class="btn primary" style="width: 100%;">View Account Status</button>
+      `;
+      
+      // Add animation styles
+      const style = document.createElement('style');
+      style.textContent = `
+        .success-animation {
+          display: flex;
+          justify-content: center;
+          margin: 20px 0;
+        }
+        .checkmark {
+          width: 80px;
+          height: 80px;
+          border-radius: 50%;
+          display: block;
+          stroke-width: 2;
+          stroke: #4cc9f0;
+          stroke-miterlimit: 10;
+          box-shadow: 0 0 0 #4cc9f0;
+          animation: fill 0.4s ease-in-out 0.4s forwards, scale 0.3s ease-in-out 0.9s both;
+        }
+        .checkmark__circle {
+          stroke-dasharray: 166;
+          stroke-dashoffset: 166;
+          stroke-width: 2;
+          stroke: #4cc9f0;
+          fill: none;
+          animation: stroke 0.6s cubic-bezier(0.65, 0, 0.45, 1) forwards;
+        }
+        .checkmark__check {
+          transform-origin: 50% 50%;
+          stroke-dasharray: 48;
+          stroke-dashoffset: 48;
+          animation: stroke 0.3s cubic-bezier(0.65, 0, 0.45, 1) 0.8s forwards;
+        }
+        @keyframes stroke {
+          100% { stroke-dashoffset: 0; }
+        }
+        @keyframes scale {
+          0%, 100% { transform: none; }
+          50% { transform: scale3d(1.1, 1.1, 1); }
+        }
+        @keyframes fill {
+          100% { box-shadow: inset 0 0 0 80px rgba(76, 201, 240, 0.1); }
+        }
+      `;
+      document.head.appendChild(style);
+      
+      // Add event listener to view account button
+      document.getElementById('viewAccountBtn').addEventListener('click', () => {
+        checkAccount(reportData.platform, reportData.accountId, false, elements);
+      });
+      
+      showSection('report', elements);
+      
+    } catch (error) {
+      console.error('Error submitting report:', error);
+      
+      // Reset button state
+      elements.submitReportBtn.disabled = false;
+      elements.submitReportBtn.innerHTML = `
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+          <path d="M5 13L9 17L19 7" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+        </svg>
+        Submit Report
+      `;
+      
+      // Show error notification
+      showNotification(`Error: ${error.message}`, 'error');
+      
+      // Show the appropriate section
+      if (currentAccount) {
+        showSection('account', elements);
+      } else {
+        showSection('report', elements); // Stay on report form to let user try again
+      }
+    }
+  } catch (error) {
+    console.error('Error submitting report:', error);
   }
-});
-
-// Event Listeners
-submitReportBtn.addEventListener('click', submitReport);
-
-cancelReportBtn.addEventListener('click', () => {
-  if (currentAccount) {
-    platformSelect.value = currentAccount.platform;
-    accountIdInput.value = currentAccount.id;
-    checkAccount(currentAccount.platform, currentAccount.id);
-    showSection('account');
-  } else {
-    showSection('home');
-  }
-});
-
-reportNewBtn.addEventListener('click', () => {
-  platformSelect.value = 'twitter';
-  accountIdInput.value = '';
-  evidenceInput.value = '';
-  evidenceUrlInput.value = '';
-  showSection('report');
-});
-
-checkAgainBtn.addEventListener('click', () => {
-  if (currentAccount) {
-    checkAccount(currentAccount.platform, currentAccount.id, true); // true = force refresh
-  }
-});
-
-manualCheckBtn.addEventListener('click', () => {
-  const platform = manualPlatformSelect.value;
-  const accountId = manualAccountIdInput.value;
-  
-  if (!accountId) {
-    alert('Please enter an account ID');
-    return;
-  }
-  
-  checkAccount(platform, accountId);
-});
-
-// Add input animations
-const inputs = document.querySelectorAll('input, select, textarea');
-inputs.forEach(input => {
-  input.addEventListener('focus', () => {
-    input.parentElement.classList.add('focused');
-  });
-  input.addEventListener('blur', () => {
-    input.parentElement.classList.remove('focused');
-  });
-});
+}
 
 // Initialize the popup
-document.addEventListener('DOMContentLoaded', initializePopup);
+document.addEventListener('DOMContentLoaded', async () => {
+  // Get all DOM elements after document is loaded
+  const loadingEl = document.getElementById('loading');
+  const mainContentEl = document.getElementById('mainContent');
+  const reportFormEl = document.getElementById('reportForm');
+  const accountInfoEl = document.getElementById('accountInfo');
+  const homeScreenEl = document.getElementById('homeScreen');
+
+  // Form elements
+  const platformSelect = document.getElementById('platform');
+  const accountIdInput = document.getElementById('accountId');
+  const evidenceInput = document.getElementById('evidence');
+  const evidenceUrlInput = document.getElementById('evidenceUrl');
+  const submitReportBtn = document.getElementById('submitReportBtn');
+  const cancelReportBtn = document.getElementById('cancelReportBtn');
+
+  // Account info elements
+  const accountIdDisplay = document.getElementById('accountIdDisplay');
+  const accountStatus = document.getElementById('accountStatus');
+  const votesInfo = document.getElementById('votesInfo');
+  const scammerWarning = document.getElementById('scammerWarning');
+  const reportBtn = document.getElementById('reportBtn');
+  const checkAgainBtn = document.getElementById('checkAgainBtn');
+
+  // Home screen elements
+  const manualPlatformSelect = document.getElementById('manualPlatform');
+  const manualAccountIdInput = document.getElementById('manualAccountId');
+  const manualCheckBtn = document.getElementById('manualCheckBtn');
+  const reportNewBtn = document.getElementById('reportNewBtn');
+  
+  // Create an elements object to pass to functions
+  const elements = {
+    loadingEl,
+    mainContentEl,
+    reportFormEl,
+    accountInfoEl,
+    homeScreenEl,
+    platformSelect,
+    accountIdInput,
+    evidenceInput,
+    evidenceUrlInput,
+    submitReportBtn,
+    cancelReportBtn,
+    accountIdDisplay,
+    accountStatus,
+    votesInfo,
+    scammerWarning,
+    reportBtn,
+    checkAgainBtn,
+    manualPlatformSelect,
+    manualAccountIdInput,
+    manualCheckBtn,
+    reportNewBtn
+  };
+  
+  // Setup event listeners, with null checks to prevent errors
+  if (elements.reportBtn) {
+    elements.reportBtn.addEventListener('click', async () => {
+      if (currentAccount) {
+        // Check if already reported before showing the form
+        const alreadyReported = await hasReportedAccount(currentAccount.platform, currentAccount.id);
+        if (alreadyReported) {
+          showNotification(`You have already reported the account @${currentAccount.id}. Each user can only report an account once.`, 'error');
+          return;
+        }
+        
+        elements.platformSelect.value = currentAccount.platform;
+        elements.accountIdInput.value = currentAccount.id;
+        showSection('report', elements);
+      }
+    });
+  }
+
+  if (elements.submitReportBtn) {
+    elements.submitReportBtn.addEventListener('click', () => {
+      submitReport(elements);
+    });
+  }
+
+  if (elements.cancelReportBtn) {
+    elements.cancelReportBtn.addEventListener('click', () => {
+      if (currentAccount) {
+        elements.platformSelect.value = currentAccount.platform;
+        elements.accountIdInput.value = currentAccount.id;
+        checkAccount(currentAccount.platform, currentAccount.id, false, elements);
+        showSection('account', elements);
+      } else {
+        showSection('home', elements);
+      }
+    });
+  }
+
+  if (elements.reportNewBtn) {
+    elements.reportNewBtn.addEventListener('click', () => {
+      elements.platformSelect.value = 'twitter';
+      elements.accountIdInput.value = '';
+      elements.evidenceInput.value = '';
+      elements.evidenceUrlInput.value = '';
+      showSection('report', elements);
+    });
+  }
+
+  if (elements.checkAgainBtn) {
+    elements.checkAgainBtn.addEventListener('click', () => {
+      if (currentAccount) {
+        checkAccount(currentAccount.platform, currentAccount.id, true, elements); // true = force refresh
+      }
+    });
+  }
+
+  if (elements.manualCheckBtn) {
+    elements.manualCheckBtn.addEventListener('click', () => {
+      const platform = elements.manualPlatformSelect.value;
+      const accountId = elements.manualAccountIdInput.value;
+      
+      if (!accountId) {
+        alert('Please enter an account ID');
+        return;
+      }
+      
+      checkAccount(platform, accountId, false, elements);
+    });
+  }
+
+  // Add input animations
+  const inputs = document.querySelectorAll('input, select, textarea');
+  inputs.forEach(input => {
+    input.addEventListener('focus', () => {
+      input.parentElement.classList.add('focused');
+    });
+    input.addEventListener('blur', () => {
+      input.parentElement.classList.remove('focused');
+    });
+  });
+
+  // Generate fingerprint in background
+  ensureFingerprint().catch(console.error);
+  
+  // Initialize popup
+  initializePopup(elements);
+});

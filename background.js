@@ -1,16 +1,61 @@
 // Reach Paglu background script
+import api from './utils/api.js';
+import cache from './utils/cache.js';
 
-// Configuration
-const API_URL = 'https://reach-paglu-backend.onrender.com'
-const LOCAL_CACHE_DURATION = 5 * 60 * 1000; // 5 minutes in milliseconds
-const localCache = {};
+// Cache durations
+const CACHE_DURATIONS = {
+  ACCOUNT_STATUS: {
+    SAFE: 5 * 60 * 1000,         // 5 minutes for safe accounts
+    SCAMMER: 7 * 24 * 60 * 60 * 1000  // 7 days for scammer accounts
+  },
+  ACCOUNT_EVIDENCE: 15 * 60 * 1000, // 15 minutes
+  REPORTED_ACCOUNT: 24 * 60 * 60 * 1000 // 24 hours
+};
 
 // Helper function to sanitize input strings
 function sanitizeInput(input) {
   if (typeof input !== 'string') return input;
   // Basic sanitization to prevent XSS
-  return input.replace(/[<>]/g, '');
+  return input.replace(/[<>]/g, '').trim();
 }
+
+// Helper function to safely call cache methods with error handling
+function safeCache(method, ...args) {
+  try {
+    if (cache && typeof cache[method] === 'function') {
+      return cache[method](...args);
+    }
+    console.warn(`Cache method ${method} not available`);
+    return Promise.resolve(null);
+  } catch (error) {
+    console.error(`Error calling cache.${method}:`, error);
+    return Promise.resolve(null);
+  }
+}
+
+// Rate limiting for API requests (in-memory)
+const rateLimits = {
+  lastRequests: {},
+  
+  // Check if request should be rate limited
+  shouldLimit(action, maxPerMinute = 30) {
+    const now = Date.now();
+    const key = `rateLimit:${action}`;
+    const requests = this.lastRequests[key] || [];
+    
+    // Remove requests older than 1 minute
+    const recentRequests = requests.filter(time => now - time < 60000);
+    this.lastRequests[key] = recentRequests;
+    
+    // Check if under the limit
+    if (recentRequests.length < maxPerMinute) {
+      this.lastRequests[key].push(now);
+      return false;
+    }
+    
+    return true;
+  }
+};
 
 // Listen for messages with improved error handling
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
@@ -19,12 +64,6 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       // Basic message validation
       if (!message || typeof message !== 'object' || !message.action) {
         return {success: false, error: 'Invalid message format'};
-      }
-      
-      // Check if context is still valid
-      if (chrome.runtime.lastError) {
-        console.error('Extension context error:', chrome.runtime.lastError);
-        return {success: false, error: 'Extension context error'};
       }
       
       // Handle opening report form
@@ -43,22 +82,53 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         return {success: true};
       }
       
-      // Handle checking account
+      // Handle checking account with rate limiting
       if (message.action === 'checkAccount') {
+        // Check rate limit (10 requests per minute)
+        if (rateLimits.shouldLimit('checkAccount', 10)) {
+          return {success: false, error: 'Rate limit exceeded. Please try again later.'};
+        }
+        
         // Validate inputs
         const platform = sanitizeInput(message.platform);
         const accountId = sanitizeInput(message.accountId);
+        const forceRefresh = !!message.forceRefresh;
         
         if (!platform || !accountId) {
           return {success: false, error: 'Invalid parameters'};
         }
         
-        const data = await checkAccount(platform, accountId);
-        return {success: true, data};
+        // Check cache first if not forcing refresh
+        if (!forceRefresh) {
+          const cachedData = await safeCache('getFormatted', 'accountStatus', platform, accountId);
+          if (cachedData) {
+            return {success: true, data: cachedData, cached: true};
+          }
+        }
+        
+        // Fetch from API
+        const response = await api.checkAccount(platform, accountId);
+        
+        // Cache successful response with different durations based on status
+        if (response.success) {
+          // Determine cache duration based on account status
+          const cacheDuration = response.data.status === 'scammer' 
+            ? CACHE_DURATIONS.ACCOUNT_STATUS.SCAMMER  // 7 days for scammer accounts
+            : CACHE_DURATIONS.ACCOUNT_STATUS.SAFE;    // 5 minutes for safe accounts
+            
+          await safeCache('setFormatted', 'accountStatus', response.data, cacheDuration, platform, accountId);
+        }
+        
+        return response;
       }
       
-      // Handle submitting report
+      // Handle submitting report with rate limiting
       if (message.action === 'submitReport') {
+        // Check rate limit (3 reports per 5 minutes)
+        if (rateLimits.shouldLimit('submitReport', 3)) {
+          return {success: false, error: 'Rate limit exceeded. Please try again later.'};
+        }
+        
         // Validate input
         if (!message.reportData || typeof message.reportData !== 'object') {
           return {success: false, error: 'Invalid report data'};
@@ -70,7 +140,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           accountId: sanitizeInput(message.reportData.accountId),
           evidence: sanitizeInput(message.reportData.evidence),
           evidenceUrl: message.reportData.evidenceUrl ? sanitizeInput(message.reportData.evidenceUrl) : null,
-          reporterToken: message.reportData.reporterToken ? sanitizeInput(message.reportData.reporterToken) : null
+          reporterToken: message.reportData.reporterToken ? sanitizeInput(message.reportData.reporterToken) : null,
+          fingerprintId: message.reportData.fingerprintId ? sanitizeInput(message.reportData.fingerprintId) : null
         };
         
         // Validate required fields
@@ -78,243 +149,137 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           return {success: false, error: 'Missing required fields'};
         }
         
-        const result = await submitReport(reportData);
-        // Clear local cache for this account when submitting a new report
-        if (result.success) {
-          const cacheKey = `${reportData.platform}:${reportData.accountId}`;
-          delete localCache[cacheKey];
+        // Submit report
+        const response = await api.submitReport(reportData);
+        
+        // If successful, invalidate related caches
+        if (response.success) {
+          await safeCache('removePattern', `accountStatus:${reportData.platform}:${reportData.accountId}`);
+          await safeCache('removePattern', `evidence:${reportData.platform}:${reportData.accountId}`);
+          
+          // Store in reported accounts
+          const accountKey = `${reportData.platform}:${reportData.accountId}`;
+          await storeReportedAccount(accountKey);
         }
-        return {success: true, result};
+        
+        return response;
+      }
+      
+      // Handle getting evidence
+      if (message.action === 'getEvidence') {
+        // Validate inputs
+        const platform = sanitizeInput(message.platform);
+        const accountId = sanitizeInput(message.accountId);
+        const forceRefresh = !!message.forceRefresh;
+        
+        if (!platform || !accountId) {
+          return {success: false, error: 'Invalid parameters'};
+        }
+        
+        // Check cache first if not forcing refresh
+        if (!forceRefresh) {
+          const cachedData = await safeCache('getFormatted', 'evidence', platform, accountId);
+          if (cachedData) {
+            return {success: true, data: cachedData, cached: true};
+          }
+        }
+        
+        // Fetch from API
+        const response = await api.getEvidence(platform, accountId);
+        
+        // Cache successful response
+        if (response.success) {
+          await safeCache('setFormatted', 'evidence', response.data, CACHE_DURATIONS.ACCOUNT_EVIDENCE, platform, accountId);
+        }
+        
+        return response;
       }
       
       // Handle clearing cache
       if (message.action === 'clearCache') {
         if (message.accountKey) {
           const accountKey = sanitizeInput(message.accountKey);
-          delete localCache[accountKey];
+          const [platform, accountId] = accountKey.split(':');
+          
+          await safeCache('removePattern', `*:${platform}:${accountId}`);
           return {success: true, message: `Cache cleared for ${accountKey}`};
         } else {
-          // Clear all cache
-          Object.keys(localCache).forEach(key => delete localCache[key]);
+          // Clear all account-related caches
+          await safeCache('removePattern', 'accountStatus:*');
+          await safeCache('removePattern', 'evidence:*');
           return {success: true, message: 'All cache cleared'};
         }
+      }
+      
+      // Handle checking if account is already reported
+      if (message.action === 'hasReportedAccount') {
+        const platform = sanitizeInput(message.platform);
+        const accountId = sanitizeInput(message.accountId);
+        
+        if (!platform || !accountId) {
+          return {success: false, error: 'Invalid parameters'};
+        }
+        
+        const accountKey = `${platform}:${accountId}`;
+        const isReported = await checkReportedAccount(accountKey);
+        
+        return {success: true, isReported};
       }
       
       return {success: false, error: 'Unknown action'};
       
     } catch (error) {
       console.error('Message handler error:', error);
-      return {success: false, error: error.message};
+      return {success: false, error: error.message || 'Unknown error'};
     }
   };
   
   // Execute the async operation and handle the response
   asyncOperation()
-    .then(result => {
-      try {
-        sendResponse(result);
-      } catch (error) {
-        console.error('Error sending response:', error);
-      }
-    })
+    .then(sendResponse)
     .catch(error => {
       console.error('Async operation error:', error);
-      try {
-        sendResponse({success: false, error: error.message});
-      } catch (sendError) {
-        console.error('Error sending error response:', sendError);
-      }
+      sendResponse({success: false, error: error.message || 'Unknown error'});
     });
   
   return true; // Keep the message channel open for async response
 });
 
-// Check if an account is flagged as a scammer with enhanced error handling
-async function checkAccount(platform, accountId) {
+// Store reported account
+async function storeReportedAccount(accountKey) {
   try {
-    // Check if context is still valid
-    if (chrome.runtime.lastError) {
-      console.error('Runtime error detected:', chrome.runtime.lastError);
-      throw new Error('Extension context invalidated');
-    }
+    const result = await chrome.storage.local.get('reportedAccounts');
+    const reportedAccounts = result.reportedAccounts || [];
     
-    const cacheKey = `${platform}:${accountId}`;
-    
-    // Check if we have a valid cached response
-    if (localCache[cacheKey] && localCache[cacheKey].expires > Date.now()) {
-      return localCache[cacheKey].data;
-    }
-    
-    // No valid cache, fetch from API with better error handling
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 10000); // 10s timeout
-    
-    try {
-      const response = await fetch(
-        `${API_URL}/check/${encodeURIComponent(platform)}/${encodeURIComponent(accountId)}`, 
-        {
-          headers: {
-            'Cache-Control': 'no-cache',
-            'Pragma': 'no-cache',
-          },
-          signal: controller.signal
-        }
-      );
-      
-      clearTimeout(timeoutId);
-      
-      if (!response.ok) {
-        throw new Error(`API error: ${response.status}`);
-      }
-      
-      const data = await response.json();
-      
-      // Cache the response locally
-      localCache[cacheKey] = {
-        data,
-        expires: Date.now() + LOCAL_CACHE_DURATION
-      };
-      
-      return data;
-    } catch (fetchError) {
-      clearTimeout(timeoutId);
-      console.error('API fetch error:', fetchError);
-      
-      // If we have expired cache, return it as a fallback
-      if (localCache[cacheKey]) {
-        console.log('Using expired cache as fallback');
-        return localCache[cacheKey].data;
-      }
-      
-      throw fetchError;
+    if (!reportedAccounts.includes(accountKey)) {
+      reportedAccounts.push(accountKey);
+      await chrome.storage.local.set({ reportedAccounts });
     }
   } catch (error) {
-    console.error('Error checking account:', error);
-    throw error;
+    console.error('Error storing reported account:', error);
   }
 }
 
-// Submit a scam report
-async function submitReport(reportData) {
+// Check if account is already reported
+async function checkReportedAccount(accountKey) {
   try {
-    // Create a random nonce for CSRF protection
-    const nonce = Math.random().toString(36).substring(2);
-    
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 10000); // 10s timeout
-    
-    try {
-      const response = await fetch(`${API_URL}/report`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Cache-Control': 'no-cache',
-          'X-Requested-With': 'XMLHttpRequest',
-          'X-Nonce': nonce
-        },
-        body: JSON.stringify(reportData),
-        signal: controller.signal
-      });
-      
-      clearTimeout(timeoutId);
-      
-      const data = await response.json();
-      
-      if (!response.ok) {
-        return {
-          success: false,
-          error: data.message || `API error: ${response.status}`,
-          isDuplicate: data.isDuplicate || false
-        };
-      }
-      
-      return {
-        success: true,
-        result: data
-      };
-    } catch (fetchError) {
-      clearTimeout(timeoutId);
-      console.error('API fetch error:', fetchError);
-      throw fetchError;
-    }
-    
+    const result = await chrome.storage.local.get('reportedAccounts');
+    const reportedAccounts = result.reportedAccounts || [];
+    return reportedAccounts.includes(accountKey);
   } catch (error) {
-    console.error('Error submitting report:', error);
-    return {
-      success: false,
-      error: error.message
-    };
+    console.error('Error checking reported account:', error);
+    return false;
   }
 }
 
-// Add a function to get evidence with caching
-async function getEvidence(platform, accountId) {
-  try {
-    const cacheKey = `evidence:${platform}:${accountId}`;
-    
-    // Check if we have a valid cached response
-    if (localCache[cacheKey] && localCache[cacheKey].expires > Date.now()) {
-      return localCache[cacheKey].data;
-    }
-    
-    const response = await fetch(`${API_URL}/evidence/${encodeURIComponent(platform)}/${encodeURIComponent(accountId)}`, {
-      headers: {
-        'Cache-Control': 'no-cache',
-        'X-Requested-With': 'XMLHttpRequest'
-      }
-    });
-    
-    if (!response.ok) {
-      throw new Error(`API error: ${response.status}`);
-    }
-    
-    const data = await response.json();
-    
-    // Cache the response locally with shorter duration
-    localCache[cacheKey] = {
-      data,
-      expires: Date.now() + (LOCAL_CACHE_DURATION / 2) // Half the normal cache time
-    };
-    
-    return data;
-  } catch (error) {
-    console.error('Error fetching evidence:', error);
-    throw error;
+// On install/update event listener
+chrome.runtime.onInstalled.addListener(details => {
+  if (details.reason === 'install') {
+    // Clear all caches on fresh install
+    safeCache('removePattern', '*').catch(console.error);
+  } else if (details.reason === 'update') {
+    // Only clear API response caches on update, preserve user preferences
+    safeCache('removePattern', 'accountStatus:*').catch(console.error);
+    safeCache('removePattern', 'evidence:*').catch(console.error);
   }
-}
-
-// Get system statistics
-async function getStats() {
-  try {
-    const cacheKey = 'stats:global';
-    
-    // Check if we have a valid cached response (shorter cache for stats)
-    if (localCache[cacheKey] && localCache[cacheKey].expires > Date.now()) {
-      return localCache[cacheKey].data;
-    }
-    
-    const response = await fetch(`${API_URL}/stats`, {
-      headers: {
-        'Cache-Control': 'no-cache',
-        'X-Requested-With': 'XMLHttpRequest'
-      }
-    });
-    
-    if (!response.ok) {
-      throw new Error(`API error: ${response.status}`);
-    }
-    
-    const data = await response.json();
-    
-    // Cache the response locally
-    localCache[cacheKey] = {
-      data,
-      expires: Date.now() + (LOCAL_CACHE_DURATION / 2) // Half the normal cache time
-    };
-    
-    return data;
-  } catch (error) {
-    console.error('Error fetching stats:', error);
-    throw error;
-  }
-}
+});

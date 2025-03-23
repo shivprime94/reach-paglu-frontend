@@ -1,20 +1,35 @@
 // ReachPaglu content script - runs on X/Twitter and LinkedIn
 
+// Don't use imports in content scripts as they can't be modules
+// Instead, we'll implement API, cache and validation functionality directly
+// or load them dynamically when needed
+
 // Configuration
-const API_URL = 'https://reach-paglu-backend.onrender.com'
-const CHECK_INTERVAL = 2000; // Check every 2 seconds for account changes (navigation)
+const CHECK_INTERVAL = 5000; // Reduced frequency (5 seconds instead of 2)
 const MAX_RETRIES = 3;       // Maximum number of retries when getting extension context errors
 const RETRY_DELAY = 500;     // 500ms between retries
+const DEBOUNCE_DELAY = 500;  // Debounce delay for page checks
+
+// Cache durations - mirror background.js values
+const CACHE_DURATIONS = {
+  ACCOUNT_STATUS: {
+    SAFE: 5 * 60 * 1000,         // 5 minutes for safe accounts
+    SCAMMER: 7 * 24 * 60 * 60 * 1000  // 7 days for scammer accounts
+  }
+};
 
 // State
 let lastCheckedUrl = '';
 let warningBanner = null;
+let lastCheckTime = 0;
+let checkTimeout = null;
+let mutationObserver = null;
 
 // Helper function to sanitize input strings
 function sanitizeInput(input) {
   if (typeof input !== 'string') return input;
   // Basic sanitization to prevent XSS
-  return input.replace(/[<>]/g, '');
+  return input.replace(/[<>]/g, '').trim();
 }
 
 // Safely create HTML content
@@ -87,12 +102,12 @@ function extractAccountId() {
   return null;
 }
 
-// Check if an account is flagged as a scammer with retry mechanism
+// Check if an account is flagged as a scammer with optimized caching and retry mechanism
 async function checkAccount(accountInfo, forceRefresh = false, retryCount = 0) {
   if (!accountInfo) return null;
   
   try {
-    // Sanitize inputs
+    // Validate and sanitize inputs
     const platform = sanitizeInput(accountInfo.platform);
     const id = sanitizeInput(accountInfo.id);
     
@@ -101,25 +116,43 @@ async function checkAccount(accountInfo, forceRefresh = false, retryCount = 0) {
       return null;
     }
     
-    // Add forceRefresh flag to message if needed
+    // Get fingerprint for API calls
+    let fingerprintId = null;
+    try {
+      const result = await chrome.storage.local.get('fingerprint');
+      fingerprintId = result.fingerprint;
+    } catch (error) {
+      console.warn('Failed to get fingerprint', error);
+    }
+    
+    // First check cache via background script
+    if (!forceRefresh) {
+      try {
+        const response = await sendMessageWithTimeout({
+          action: 'checkAccount',
+          platform,
+          accountId: id,
+          fingerprintId,
+          forceRefresh: false,
+          checkCacheOnly: true
+        });
+        
+        if (response && response.success && response.cached) {
+          return response.data;
+        }
+      } catch (error) {
+        console.warn('Cache check error:', error);
+      }
+    }
+    
+    // Send message to background script
     const message = {
       action: 'checkAccount',
       platform,
-      accountId: id
+      accountId: id,
+      fingerprintId,
+      forceRefresh
     };
-    
-    if (forceRefresh) {
-      // If forcing a refresh, first clear the cache for this account
-      try {
-        await chrome.runtime.sendMessage({
-          action: 'clearCache',
-          accountKey: `${platform}:${id}`
-        });
-      } catch (error) {
-        console.warn('Cache clearing failed, continuing with check:', error);
-        // Continue anyway - non-critical operation
-      }
-    }
     
     // Wrap message sending in a promise with timeout
     const response = await sendMessageWithTimeout(message);
@@ -189,11 +222,23 @@ function sendMessageWithTimeout(message, timeout = 5000) {
 async function fetchAccountDataDirectly(platform, accountId) {
   try {
     console.log('Attempting direct API call as fallback');
+    
+    const fingerprintId = await getFingerprint();
+    const requestHeaders = {
+      'Cache-Control': 'no-cache',
+      'X-Requested-With': 'XMLHttpRequest',
+      'User-Agent': navigator.userAgent
+    };
+    
+    if (fingerprintId) {
+      requestHeaders['X-Fingerprint-ID'] = fingerprintId;
+    }
+    
     const response = await fetch(
       `https://reach-paglu-backend.onrender.com/check/${encodeURIComponent(platform)}/${encodeURIComponent(accountId)}`,
       {
         method: 'GET',
-        headers: { 'Cache-Control': 'no-cache' }
+        headers: requestHeaders
       }
     );
     
@@ -201,10 +246,34 @@ async function fetchAccountDataDirectly(platform, accountId) {
       throw new Error(`API error: ${response.status}`);
     }
     
-    return await response.json();
+    const data = await response.json();
+    
+    // Cache the result locally with different durations based on status
+    try {
+      const cacheDuration = data.status === 'scammer' 
+        ? CACHE_DURATIONS.ACCOUNT_STATUS.SCAMMER  // 7 days for scammer accounts
+        : CACHE_DURATIONS.ACCOUNT_STATUS.SAFE;    // 5 minutes for safe accounts
+        
+      await cache.setFormatted('accountStatus', data, cacheDuration, platform, accountId);
+    } catch (cacheError) {
+      console.warn('Could not cache results:', cacheError);
+    }
+    
+    return data;
   } catch (error) {
     console.error('Direct API call failed:', error);
     throw error;
+  }
+}
+
+// Get cached fingerprint or generate new one
+async function getFingerprint() {
+  try {
+    const result = await chrome.storage.local.get('fingerprint');
+    return result.fingerprint;
+  } catch (error) {
+    console.warn('Could not get fingerprint:', error);
+    return null;
   }
 }
 
@@ -396,7 +465,7 @@ function showWarningBanner(accountInfo, data) {
 function createWarningBadge() {
   const badge = document.createElement('span');
   badge.className = 'reachpaglu-badge';
-  badge.innerHTML = '⚠️ Reported as reachpaglu';
+  badge.innerHTML = '⚠️ Reported as scammer';
   badge.style.cssText = `
     background-color: rgba(247, 37, 133, 0.9);
     color: white;
@@ -471,9 +540,26 @@ function injectLinkedInBadges(accountInfo, data) {
   });
 }
 
+// Debounce function to prevent too many API calls during rapid navigation/DOM changes
+function debounce(func, wait) {
+  return function (...args) {
+    clearTimeout(checkTimeout);
+    checkTimeout = setTimeout(() => {
+      func.apply(this, args);
+    }, wait);
+  };
+}
+
 // Main function to check accounts and display warnings
-async function checkCurrentPage(forceRefresh = false) {
+const checkCurrentPage = debounce(async (forceRefresh = false) => {
   try {
+    // Minimum time between checks (5 seconds) unless forcing refresh
+    const now = Date.now();
+    if (!forceRefresh && now - lastCheckTime < 5000) {
+      return;
+    }
+    lastCheckTime = now;
+    
     // Only check if URL changed to avoid constant API calls, unless forceRefresh is true
     if (forceRefresh || window.location.href !== lastCheckedUrl) {
       lastCheckedUrl = window.location.href;
@@ -505,11 +591,16 @@ async function checkCurrentPage(forceRefresh = false) {
     console.error('Check page error:', error);
     // Don't throw the error further, just log it
   }
-}
+}, DEBOUNCE_DELAY);
 
 // Add MutationObserver to handle dynamically loaded content
 function initializeBadgeObserver() {
-  const observer = new MutationObserver(async (mutations) => {
+  // Clean up existing observer if one exists
+  if (mutationObserver) {
+    mutationObserver.disconnect();
+  }
+  
+  mutationObserver = new MutationObserver(async (mutations) => {
     const accountInfo = extractAccountId();
     if (accountInfo) {
       const data = await checkAccount(accountInfo);
@@ -523,25 +614,31 @@ function initializeBadgeObserver() {
     }
   });
 
-  observer.observe(document.body, {
+  mutationObserver.observe(document.body, {
     childList: true,
-    subtree: true
+    subtree: true,
+    attributes: false,
+    characterData: false
   });
 }
 
 // Initialize and set up periodic checking with error handling
 function initialize() {
   // Do an initial check with error handling
-  checkCurrentPage().catch(err => {
+  checkCurrentPage(false).catch(err => {
     console.warn('Initial page check failed:', err);
   });
   
-  // Set up interval to check periodically with error handling
-  setInterval(() => {
-    checkCurrentPage().catch(err => {
-      console.warn('Periodic page check failed:', err);
-    });
-  }, CHECK_INTERVAL);
+  // Listen for URL changes - modern SPA approach
+  let lastUrl = location.href;
+  new MutationObserver(() => {
+    if (location.href !== lastUrl) {
+      lastUrl = location.href;
+      checkCurrentPage(false).catch(err => {
+        console.warn('URL change page check failed:', err);
+      });
+    }
+  }).observe(document, {subtree: true, childList: true});
   
   initializeBadgeObserver();
 
