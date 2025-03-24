@@ -6,6 +6,7 @@
 // Extension configuration
 export const config = {
   API_URL: 'https://reach-paglu-backend.onrender.com',
+// API_URL: 'http://localhost:3000', // Local testing
   VERSION: chrome.runtime.getManifest().version,
   CACHE_DURATIONS: {
     ACCOUNT_STATUS: {

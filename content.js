@@ -548,11 +548,19 @@ function injectLinkedInBadges(accountInfo, data) {
 
 // Debounce function to prevent too many API calls during rapid navigation/DOM changes
 function debounce(func, wait) {
-  return function (...args) {
-    clearTimeout(checkTimeout);
-    checkTimeout = setTimeout(() => {
-      func.apply(this, args);
-    }, wait);
+  let timeout;
+  return function(...args) {
+    return new Promise((resolve, reject) => {
+      clearTimeout(timeout);
+      timeout = setTimeout(async () => {
+        try {
+          const result = await func.apply(this, args);
+          resolve(result);
+        } catch (error) {
+          reject(error);
+        }
+      }, wait);
+    });
   };
 }
 
@@ -631,15 +639,24 @@ function initializeBadgeObserver() {
 
 // Initialize and set up periodic checking with error handling
 function initialize() {
+  // Do an initial check with error handling
+  checkCurrentPage(false).catch(err => {
+    console.warn('Initial page check failed:', err);
+  });
+  
   // Listen for URL changes - modern SPA approach
   let lastUrl = location.href;
-  if(location.href !== lastUrl) {
-    lastUrl = location.href;
-    initializeBadgeObserver();
-    checkCurrentPage(false).catch(err => {
-      console.warn('URL change page check failed:', err);
-    });
-  }
+  new MutationObserver(() => {
+    if (location.href !== lastUrl) {
+      lastUrl = location.href;
+      initializeBadgeObserver();
+      checkCurrentPage(false).catch(err => {
+        console.warn('URL change page check failed:', err);
+      });
+    }
+  }).observe(document, {subtree: true, childList: true});
+  
+  initializeBadgeObserver();
 
   // Listen for manual check requests from popup with force refresh option
   chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
