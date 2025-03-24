@@ -102,7 +102,7 @@ function extractAccountId() {
   return null;
 }
 
-// Check if an account is flagged as a scammer with optimized caching and retry mechanism
+// Updated check account function with better error handling
 async function checkAccount(accountInfo, forceRefresh = false, retryCount = 0) {
   if (!accountInfo) return null;
   
@@ -115,74 +115,64 @@ async function checkAccount(accountInfo, forceRefresh = false, retryCount = 0) {
       console.error('Invalid account info');
       return null;
     }
-    
-    // Get fingerprint for API calls
+
+    // First try to get fingerprint - with retry
     let fingerprintId = null;
-    try {
-      const result = await chrome.storage.local.get('fingerprint');
-      fingerprintId = result.fingerprint;
-    } catch (error) {
-      console.warn('Failed to get fingerprint', error);
-    }
-    
-    // First check cache via background script
-    if (!forceRefresh) {
+    for (let i = 0; i < 3; i++) {
       try {
-        const response = await sendMessageWithTimeout({
-          action: 'checkAccount',
-          platform,
-          accountId: id,
-          fingerprintId,
-          forceRefresh: false,
-          checkCacheOnly: true
-        });
-        
-        if (response && response.success && response.cached) {
-          return response.data;
-        }
+        const result = await chrome.storage.local.get('fingerprint');
+        fingerprintId = result.fingerprint;
+        if (fingerprintId) break;
+        await new Promise(resolve => setTimeout(resolve, 1000));
       } catch (error) {
-        console.warn('Cache check error:', error);
+        console.warn('Retrying fingerprint fetch...');
+        await new Promise(resolve => setTimeout(resolve, 1000));
       }
     }
-    
-    // Send message to background script
-    const message = {
-      action: 'checkAccount',
-      platform,
-      accountId: id,
-      fingerprintId,
-      forceRefresh
-    };
-    
-    // Wrap message sending in a promise with timeout
-    const response = await sendMessageWithTimeout(message);
-    
-    if (response && response.success) {
-      return response.data;
-    } else if (response && response.error && response.error.includes('context invalidated')) {
-      throw new Error('Extension context invalidated');
+
+    // First check local storage cache
+    try {
+      const cacheKey = `accountStatus:${platform}:${id}`;
+      const cachedData = await chrome.storage.local.get(cacheKey);
+      if (!forceRefresh && cachedData[cacheKey] && cachedData[cacheKey].expires > Date.now()) {
+        return cachedData[cacheKey].data;
+      }
+    } catch (error) {
+      console.warn('Cache check error:', error);
     }
-    
-    return null;
+
+    // Try background script first
+    try {
+      const response = await sendMessageWithTimeout({
+        action: 'checkAccount',
+        platform,
+        accountId: id,
+        fingerprintId,
+        forceRefresh
+      }, 10000); // Increased timeout to 10 seconds
+
+      if (response && response.success) {
+        return response.data;
+      }
+    } catch (error) {
+      console.warn('Background script error:', error);
+    }
+
+    // If background script fails, try direct API call
+    return await fetchAccountDataDirectly(platform, id);
+
   } catch (error) {
     console.error('Error checking account:', error);
     
-    // Implement retry logic for context invalidation
-    if (error.message.includes('context invalidated') && retryCount < MAX_RETRIES) {
-      console.log(`Retry attempt ${retryCount + 1} for ${accountInfo.platform}:${accountInfo.id}`);
-      
-      // Wait a bit before retrying to let the extension context stabilize
-      await new Promise(resolve => setTimeout(resolve, RETRY_DELAY));
-      
-      // Try a direct API call to the backend as a fallback
-      try {
-        const data = await fetchAccountDataDirectly(accountInfo.platform, accountInfo.id);
-        if (data) return data;
-      } catch (directError) {
-        console.warn('Direct API call failed:', directError);
-        // Continue with retry
-      }
-      
+    if (error.message.includes('rate limit') || error.message.includes('Too many')) {
+      throw error; // Don't retry rate limit errors
+    }
+    
+    // Implement retry logic with exponential backoff
+    if (retryCount < MAX_RETRIES) {
+      const delay = RETRY_DELAY * Math.pow(2, retryCount);
+      console.log(`Retry attempt ${retryCount + 1} with delay ${delay}ms`);
+      await new Promise(resolve => setTimeout(resolve, delay));
       return checkAccount(accountInfo, forceRefresh, retryCount + 1);
     }
   }
@@ -218,57 +208,61 @@ function sendMessageWithTimeout(message, timeout = 5000) {
   });
 }
 
-// Fallback function to fetch data directly from API if extension context fails
+// Updated fetchAccountDataDirectly with better error handling
 async function fetchAccountDataDirectly(platform, accountId) {
-  try {
-    console.log('Attempting direct API call as fallback');
-    
-    const fingerprintId = await getFingerprint();
-    const requestHeaders = {
-      'Cache-Control': 'no-cache',
-      'X-Requested-With': 'XMLHttpRequest',
-      'User-Agent': navigator.userAgent
-    };
-    
-    if (fingerprintId) {
-      requestHeaders['X-Fingerprint-ID'] = fingerprintId;
-    }
-    
-    const response = await fetch(
-      `https://reach-paglu-backend.onrender.com/check/${encodeURIComponent(platform)}/${encodeURIComponent(accountId)}`,
-      {
-        method: 'GET',
-        headers: requestHeaders
-      }
-    );
-    
-    if (!response.ok) {
-      throw new Error(`API error: ${response.status}`);
-    }
-    
-    const data = await response.json();
-    
-    // Store in chrome.storage directly
+  let retries = 0;
+  const maxRetries = 3;
+  const baseDelay = 1000;
+
+  while (retries < maxRetries) {
     try {
-      const cacheDuration = data.status === 'scammer' 
-        ? CACHE_DURATIONS.ACCOUNT_STATUS.SCAMMER  // 7 days for scammer accounts
-        : CACHE_DURATIONS.ACCOUNT_STATUS.SAFE;    // 5 minutes for safe accounts
-      
-      chrome.storage.local.set({
-        [`accountStatus:${platform}:${accountId}`]: {
-          data,
-          expires: Date.now() + cacheDuration,
-          timestamp: Date.now()
+      const response = await fetch(
+        `https://reach-paglu-backend.onrender.com/check/${encodeURIComponent(platform)}/${encodeURIComponent(accountId)}`,
+        {
+          method: 'GET',
+          headers: {
+            'Cache-Control': 'no-cache',
+            'X-Requested-With': 'XMLHttpRequest'
+          }
         }
-      });
-    } catch (cacheError) {
-      console.warn('Could not cache results:', cacheError);
+      );
+
+      if (response.status === 429) { // Rate limit hit
+        const retryAfter = parseInt(response.headers.get('Retry-After') || '60');
+        throw new Error(`Too many account checks, please try again after a minute Please try again in ${Math.ceil(retryAfter/60)} minutes.`);
+      }
+
+      if (!response.ok) {
+        throw new Error(`API error: ${response.status}`);
+      }
+
+      const data = await response.json();
+      
+      // Cache the response
+      try {
+        chrome.storage.local.set({
+          [`accountStatus:${platform}:${accountId}`]: {
+            data,
+            expires: Date.now() + (data.status === 'scammer' ? 7 * 24 * 60 * 60 * 1000 : 5 * 60 * 1000)
+          }
+        });
+      } catch (cacheError) {
+        console.warn('Could not cache results:', cacheError);
+      }
+      
+      return data;
+
+    } catch (error) {
+      if (error.message.includes('rate limit') || error.message.includes('Too many')) {
+        throw error; // Don't retry rate limit errors
+      }
+      
+      retries++;
+      if (retries === maxRetries) throw error;
+      
+      // Exponential backoff
+      await new Promise(resolve => setTimeout(resolve, baseDelay * Math.pow(2, retries)));
     }
-    
-    return data;
-  } catch (error) {
-    console.error('Direct API call failed:', error);
-    throw error;
   }
 }
 
@@ -546,21 +540,40 @@ function injectLinkedInBadges(accountInfo, data) {
   });
 }
 
-// Debounce function to prevent too many API calls during rapid navigation/DOM changes
+// Updated debounce function with better error handling
 function debounce(func, wait) {
   let timeout;
-  return function(...args) {
-    return new Promise((resolve, reject) => {
-      clearTimeout(timeout);
-      timeout = setTimeout(async () => {
-        try {
-          const result = await func.apply(this, args);
-          resolve(result);
-        } catch (error) {
-          reject(error);
-        }
+  let isDebouncing = false;
+
+  return async function(...args) {
+    clearTimeout(timeout);
+    
+    if (isDebouncing) {
+      return new Promise(resolve => {
+        timeout = setTimeout(async () => {
+          isDebouncing = false;
+          try {
+            const result = await func.apply(this, args);
+            resolve(result);
+          } catch (error) {
+            console.error('Debounced function error:', error);
+            resolve(null);
+          }
+        }, wait);
+      });
+    }
+
+    isDebouncing = true;
+    try {
+      return await func.apply(this, args);
+    } catch (error) {
+      console.error('Immediate function error:', error);
+      return null;
+    } finally {
+      setTimeout(() => {
+        isDebouncing = false;
       }, wait);
-    });
+    }
   };
 }
 
