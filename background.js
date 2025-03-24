@@ -124,7 +124,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       
       // Handle submitting report with rate limiting
       if (message.action === 'submitReport') {
-        // Check rate limit (3 reports per 5 minutes)
+        // Check rate limit (10 reports per 5 minutes)
         if (rateLimits.shouldLimit('submitReport', 3)) {
           return {success: false, error: 'Rate limit exceeded. Please try again later.'};
         }
